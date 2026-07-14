@@ -1,8 +1,12 @@
 # Mini Claude Go
 
+[![CI](https://github.com/Hiiii113/mini-claude-go/actions/workflows/ci.yml/badge.svg)](https://github.com/Hiiii113/mini-claude-go/actions/workflows/ci.yml)
+[![Release](https://github.com/Hiiii113/mini-claude-go/actions/workflows/release.yml/badge.svg)](https://github.com/Hiiii113/mini-claude-go/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 一个使用 Go 从头实现的命令行编码 Agent。它兼容 Anthropic 原生协议和 OpenAI-compatible 协议，提供文件操作、Shell、上下文压缩、会话恢复、记忆、Skills、子 Agent、Plan Mode 与 MCP 工具扩展。
 
-> 本项目用于学习、实验和个人开发，不是 Anthropic 或 OpenAI 的官方产品。模型调用会产生相应服务商的费用。
+> 本项目用于学习、实验和个人开发，目前全程使用 codex 实现，仅用于 agent 方向学习用途
 
 ## 特性
 
@@ -51,8 +55,8 @@ go version
 ### 2. 获取源码
 
 ```bash
-git clone <你的仓库地址>
-cd mini-claude
+git clone https://github.com/Hiiii113/mini-claude-go.git
+cd mini-claude-go
 ```
 
 也可以从 GitHub Releases 下载与你操作系统对应的二进制；下载后将其重命名为 `mini-claude`（Windows 为 `mini-claude.exe`），并放到 `PATH` 中的目录。
@@ -321,7 +325,7 @@ go test ./internal/llm -run Live -v
 
 ```bash
 git branch -M main
-git remote add origin https://github.com/<你的用户名>/mini-claude.git
+git remote add origin https://github.com/Hiiii113/mini-claude-go.git
 git push -u origin main
 ```
 
@@ -335,27 +339,122 @@ git push
 
 Git 只会上传已提交文件，因此被 `.gitignore` 排除的 `.env`、构建产物和本地运行数据不会上传。不要直接把整个工作目录压缩后分享；如果必须发送压缩包，请先确认其中没有 `.env` 和任何凭据。
 
-### 2. 发布可执行文件
+### 2. 自动打包并发布 Release（推荐）
 
-生成三个平台的 amd64 二进制：
+仓库包含 [release.yml](.github/workflows/release.yml)。向 GitHub 推送以 `v` 开头的版本标签后，GitHub Actions 会自动：
+
+1. 运行完整测试。
+2. 构建 Windows、Linux、macOS 的 amd64 和 arm64 二进制。
+3. Windows 打包为 `.zip`，Linux 和 macOS 打包为 `.tar.gz`。
+4. 生成 `SHA256SUMS` 文件。
+5. 根据提交记录生成 Release Notes 并创建 GitHub Release。
+
+建议使用[语义化版本](https://semver.org/lang/zh-CN/)：
+
+- `v0.1.0`：第一个可用版本
+- `v0.1.1`：向后兼容的问题修复
+- `v0.2.0`：新增功能，但仍处于早期开发阶段
+- `v1.0.0`：第一个稳定版本
+
+发布前先确认测试通过、工作区干净，并把主分支推送到 GitHub：
 
 ```powershell
+go test ./...
+go vet ./...
+git status
+git push origin main
+```
+
+创建并推送带说明的版本标签：
+
+```powershell
+git tag -a v0.1.0 -m "Mini Claude Go v0.1.0"
+git push origin v0.1.0
+```
+
+随后打开仓库的 **Actions → release** 查看进度。成功后，GitHub 的 **Releases** 页面会出现以下文件：
+
+```text
+mini-claude-go_0.1.0_windows_amd64.zip
+mini-claude-go_0.1.0_windows_arm64.zip
+mini-claude-go_0.1.0_linux_amd64.tar.gz
+mini-claude-go_0.1.0_linux_arm64.tar.gz
+mini-claude-go_0.1.0_darwin_amd64.tar.gz
+mini-claude-go_0.1.0_darwin_arm64.tar.gz
+SHA256SUMS
+```
+
+如果工作流提示没有创建 Release 的权限，进入仓库 **Settings → Actions → General → Workflow permissions**，确认允许工作流写入仓库内容。
+
+不要移动或重复使用已经公开发布的版本标签。发布下一个版本时创建新标签，例如 `v0.1.1`。
+
+### 3. 下载并验证 Release
+
+Linux 下载压缩包和 `SHA256SUMS` 后，可以只校验当前文件：
+
+```bash
+grep 'mini-claude-go_0.1.0_linux_amd64.tar.gz' SHA256SUMS | sha256sum -c -
+```
+
+macOS 使用系统自带的 `shasum`：
+
+```bash
+grep 'mini-claude-go_0.1.0_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -
+```
+
+Windows PowerShell 可以查看下载文件的摘要，并与 `SHA256SUMS` 中对应值比较：
+
+```powershell
+Get-FileHash .\mini-claude-go_0.1.0_windows_amd64.zip -Algorithm SHA256
+Get-Content .\SHA256SUMS
+```
+
+解压后运行：
+
+```powershell
+.\mini-claude.exe --help
+```
+
+Linux / macOS：
+
+```bash
+tar -xzf mini-claude-go_0.1.0_linux_amd64.tar.gz
+cd mini-claude-go_0.1.0_linux_amd64
+chmod +x mini-claude
+./mini-claude --help
+```
+
+macOS 用户应把示例文件名中的 `linux` 改为 `darwin`。
+
+### 4. 手动发布兜底
+
+如果不使用 GitHub Actions，可以在 PowerShell 中交叉编译三个 amd64 二进制：
+
+```powershell
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force dist | Out-Null
 $env:CGO_ENABLED = "0"
 $env:GOARCH = "amd64"
-$env:GOOS = "windows"; go build -o dist/mini-claude-windows-amd64.exe .
-$env:GOOS = "linux";   go build -o dist/mini-claude-linux-amd64 .
-$env:GOOS = "darwin";  go build -o dist/mini-claude-darwin-amd64 .
+$env:GOOS = "windows"; go build -trimpath -ldflags "-s -w" -o dist/mini-claude-windows-amd64.exe .
+$env:GOOS = "linux";   go build -trimpath -ldflags "-s -w" -o dist/mini-claude-linux-amd64 .
+$env:GOOS = "darwin";  go build -trimpath -ldflags "-s -w" -o dist/mini-claude-darwin-amd64 .
 ```
 
-在 GitHub 仓库打开 **Releases → Draft a new release**，创建例如 `v0.1.0` 的标签，填写变更说明并上传 `dist/` 中的三个文件。`dist/` 已被忽略，不会误提交到源码仓库。
+安装并登录 [GitHub CLI](https://cli.github.com/) 后，可以直接创建 Release 并上传文件：
 
-仓库已包含三平台 CI；每次 push 和 pull request 都会运行测试、静态检查和构建，Linux 还会运行 race detector。
+```powershell
+gh auth login
+gh release create v0.1.0 "dist/*" --verify-tag --generate-notes --title "Mini Claude Go v0.1.0"
+```
+
+`--verify-tag` 会要求远程仓库中已经存在该标签。`dist/` 已被忽略，不会被误提交到源码仓库。
+
+仓库的 [ci.yml](.github/workflows/ci.yml) 会在每次 push 和 pull request 时运行三平台测试、静态检查和构建，Linux 额外运行 race detector。
 
 ## 项目结构
 
 ```text
-mini-claude/
+mini-claude-go/
 ├── main.go                  # 组装入口
 ├── internal/
 │   ├── agent/               # Agent Loop、Plan、子 Agent 调度
@@ -374,7 +473,7 @@ mini-claude/
 │   └── ui/                  # 终端输出
 ├── test/                    # 19 项验收清单
 ├── docs/                    # 架构决策与设计记录
-└── .github/workflows/       # 三平台 CI
+└── .github/workflows/       # 三平台 CI 与自动 Release
 ```
 
 ## 来源与许可
