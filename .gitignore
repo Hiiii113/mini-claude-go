@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+mini-claude
+mini-claude.exe
+dist/
+coverage.out
+*.test
+.mini-claude/
+.omc/
+tmp/
+test/tmp/
+
