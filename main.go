@@ -13,8 +13,11 @@ import (
 	"mini-claude/internal/cli"
 	"mini-claude/internal/config"
 	"mini-claude/internal/llm"
+	"mini-claude/internal/memory"
 	"mini-claude/internal/prompt"
 	"mini-claude/internal/session"
+	"mini-claude/internal/skills"
+	"mini-claude/internal/subagent"
 	"mini-claude/internal/ui"
 )
 
@@ -46,13 +49,23 @@ func runConfigured(ctx context.Context, options config.Options) error {
 	} else {
 		client = llm.NewOpenAIClient(llm.OpenAIOptions{APIKey: options.APIKey, BaseURL: options.APIBase})
 	}
-	systemPrompt, err := prompt.Build(ctx, prompt.Options{})
-	if err != nil {
-		return fmt.Errorf("build system prompt: %w", err)
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	memoryStore := memory.NewStore(home, cwd)
+	skillRegistry := skills.NewRegistry(home, cwd)
+	subAgentRegistry := subagent.NewRegistry(home, cwd)
+	systemPrompt, err := prompt.Build(ctx, prompt.Options{
+		WorkingDir: cwd, Memory: memoryStore.PromptSection(), Skills: skillRegistry.Descriptions(),
+		Agents: subAgentRegistry.Descriptions(), DeferredTools: []string{"enter_plan_mode", "exit_plan_mode"},
+	})
+	if err != nil {
+		return fmt.Errorf("build system prompt: %w", err)
 	}
 	renderer := ui.NewRenderer(os.Stdout)
 	defer renderer.Close()
@@ -61,7 +74,8 @@ func runConfigured(ctx context.Context, options config.Options) error {
 		Model: options.Model, PermissionMode: options.PermissionMode, Client: client,
 		SystemPrompt: systemPrompt, Thinking: options.Thinking, MaxCostUSD: options.MaxCost,
 		MaxTurns: options.MaxTurns, HomeDir: home, SessionStore: store, Output: os.Stdout,
-		Events: renderer.HandleAgentEvent,
+		Events: renderer.HandleAgentEvent, WorkingDir: cwd, Memories: memoryStore,
+		Skills: skillRegistry, SubAgents: subAgentRegistry,
 	})
 	if options.Resume {
 		data, loadErr := store.Latest()
@@ -76,6 +90,7 @@ func runConfigured(ctx context.Context, options config.Options) error {
 	}
 	if options.Prompt != "" {
 		a.SetConfirm(cli.NewConfirmer(os.Stdin, os.Stdout))
+		a.SetPlanApproval(cli.NewPlanApprover(os.Stdin, os.Stdout))
 		return a.ChatContext(ctx, options.Prompt)
 	}
 	return cli.RunRepl(a)

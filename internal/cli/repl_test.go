@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	agentpkg "mini-claude/internal/agent"
 )
 
 type fakeAgent struct {
@@ -16,6 +18,7 @@ type fakeAgent struct {
 	compacts int
 	plans    int
 	confirm  func(context.Context, string) (bool, error)
+	approve  func(context.Context, string) (agentpkg.PlanDecision, error)
 }
 
 func (a *fakeAgent) Chat(input string) error {
@@ -28,6 +31,9 @@ func (a *fakeAgent) ShowCost()                                                 {
 func (a *fakeAgent) Compact() error                                            { a.compacts++; return nil }
 func (a *fakeAgent) TogglePlanMode() string                                    { a.plans++; return "plan" }
 func (a *fakeAgent) SetConfirm(fn func(context.Context, string) (bool, error)) { a.confirm = fn }
+func (a *fakeAgent) SetPlanApproval(fn func(context.Context, string) (agentpkg.PlanDecision, error)) {
+	a.approve = fn
+}
 
 func TestRunDispatchesCommandsAndChat(t *testing.T) {
 	a := &fakeAgent{}
@@ -71,6 +77,17 @@ func TestConfirmationUsesSameInputStream(t *testing.T) {
 	}
 	if !a.allowed || !strings.Contains(output.String(), "Allow?") {
 		t.Fatalf("allowed=%v output=%q", a.allowed, output.String())
+	}
+}
+
+func TestPlanApprovalReadsFeedback(t *testing.T) {
+	approve := NewPlanApprover(strings.NewReader("4\nplease revise\n"), &bytes.Buffer{})
+	decision, err := approve(context.Background(), "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Choice != agentpkg.PlanKeepPlanning || decision.Feedback != "please revise" {
+		t.Fatalf("decision=%#v", decision)
 	}
 }
 

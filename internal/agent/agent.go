@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -18,8 +19,11 @@ import (
 
 	"mini-claude/internal/contextmgr"
 	"mini-claude/internal/llm"
+	"mini-claude/internal/memory"
 	"mini-claude/internal/permission"
 	"mini-claude/internal/session"
+	"mini-claude/internal/skills"
+	"mini-claude/internal/subagent"
 	"mini-claude/internal/tools"
 )
 
@@ -36,10 +40,12 @@ type ConfirmFunc func(ctx context.Context, message string) (bool, error)
 type EventType string
 
 const (
-	EventModelStart  EventType = "model_start"
-	EventModelOutput EventType = "model_output"
-	EventToolStart   EventType = "tool_start"
-	EventToolResult  EventType = "tool_result"
+	EventModelStart    EventType = "model_start"
+	EventModelOutput   EventType = "model_output"
+	EventToolStart     EventType = "tool_start"
+	EventToolResult    EventType = "tool_result"
+	EventSubAgentStart EventType = "subagent_start"
+	EventSubAgentEnd   EventType = "subagent_end"
 )
 
 // Event 携带 spinner 和工具摘要渲染所需的最小信息。
@@ -53,6 +59,25 @@ type Event struct {
 
 // EventFunc 接收 Agent 生命周期事件。
 type EventFunc func(Event)
+
+// PlanChoice 是退出计划模式时用户选择的审批结果。
+type PlanChoice string
+
+const (
+	PlanClearAndExecute PlanChoice = "clear-and-execute"
+	PlanExecute         PlanChoice = "execute"
+	PlanManualExecute   PlanChoice = "manual-execute"
+	PlanKeepPlanning    PlanChoice = "keep-planning"
+)
+
+// PlanDecision 包含审批选择和拒绝后的修改意见。
+type PlanDecision struct {
+	Choice   PlanChoice
+	Feedback string
+}
+
+// PlanApprovalFunc 展示计划并取得用户审批。
+type PlanApprovalFunc func(context.Context, string) (PlanDecision, error)
 
 // Options 配置 Agent 的模型、工具、权限、预算和输出目标。
 type Options struct {
@@ -74,6 +99,10 @@ type Options struct {
 	SessionStore   *session.Store
 	SessionID      string
 	Events         EventFunc
+	Memories       *memory.Store
+	Skills         *skills.Registry
+	SubAgents      *subagent.Registry
+	PlanApproval   PlanApprovalFunc
 }
 
 // Agent 是与模型厂商无关的核心 Agent Loop。
@@ -97,16 +126,27 @@ type Agent struct {
 	sessionStart time.Time
 
 	mu              sync.RWMutex
+	outputMu        sync.Mutex
 	messages        []llm.Message
 	inputTokens     int64
 	outputTokens    int64
 	turns           int
 	lastInputTokens int64
 
-	processMu     sync.Mutex
-	currentCancel context.CancelFunc
-	prePlanMode   permission.Mode
-	events        EventFunc
+	processMu          sync.Mutex
+	currentCancel      context.CancelFunc
+	prePlanMode        permission.Mode
+	events             EventFunc
+	baseSystem         string
+	memories           *memory.Store
+	skills             *skills.Registry
+	subagents          *subagent.Registry
+	planApproval       PlanApprovalFunc
+	planFilePath       string
+	pendingReset       []llm.Message
+	pendingClearStats  bool
+	surfacedMemories   map[string]bool
+	sessionMemoryBytes int
 }
 
 // New 创建 Agent；外部依赖通过 Options 注入以便离线测试。
@@ -143,14 +183,22 @@ func New(options Options) *Agent {
 	if options.SessionID == "" {
 		options.SessionID = newSessionID()
 	}
-	return &Agent{
+	result := &Agent{
 		model: options.Model, client: options.Client, tools: options.Tools, permissions: options.Permissions,
 		system: options.SystemPrompt, output: output, confirm: options.Confirm, thinking: options.Thinking,
 		maxCostUSD: options.MaxCostUSD, maxTurns: options.MaxTurns, maxTokens: maxTokens, homeDir: home,
 		workingDir: cwd, context: options.Context, sessions: options.SessionStore,
 		sessionID: options.SessionID, sessionStart: time.Now().UTC(),
-		events: options.Events,
+		events:     options.Events,
+		baseSystem: options.SystemPrompt, memories: options.Memories, skills: options.Skills,
+		subagents: options.SubAgents, planApproval: options.PlanApproval,
+		surfacedMemories: map[string]bool{},
 	}
+	if mode == permission.ModePlan {
+		result.prePlanMode = permission.ModeDefault
+		_ = result.enterPlanMode()
+	}
+	return result
 }
 
 // Chat 使用后台 Context 执行一轮用户请求，供简单 CLI 调用。
@@ -178,8 +226,39 @@ func (a *Agent) ChatContext(ctx context.Context, input string) error {
 	if a.client == nil {
 		return errors.New("LLM client is not configured")
 	}
+	userContent := input
+	if a.memories != nil {
+		prefetch := a.memories.StartPrefetch(ctx, input, a.client, a.model, a.surfacedMemories, a.sessionMemoryBytes)
+		if prefetch != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case result := <-prefetch.Done:
+				// 记忆召回失败不能阻断主任务；成功结果作为系统提醒放在本轮用户文本前。
+				if result.Err == nil && len(result.Memories) > 0 {
+					remaining := memory.MaxSessionMemoryBytes - a.sessionMemoryBytes
+					selected := make([]memory.Relevant, 0, len(result.Memories))
+					for _, item := range result.Memories {
+						if len(memory.FormatInjection(append(selected, item))) > remaining {
+							break
+						}
+						selected = append(selected, item)
+					}
+					injection := memory.FormatInjection(selected)
+					if injection == "" {
+						break
+					}
+					userContent = injection + "\n\n" + input
+					a.sessionMemoryBytes += len(injection)
+					for _, item := range selected {
+						a.surfacedMemories[item.Path] = true
+					}
+				}
+			}
+		}
+	}
 	a.mu.Lock()
-	a.messages = append(a.messages, llm.TextMessage(llm.RoleUser, input))
+	a.messages = append(a.messages, llm.TextMessage(llm.RoleUser, userContent))
 	a.mu.Unlock()
 	defer func() { _ = a.SaveSession() }()
 
@@ -239,7 +318,16 @@ func (a *Agent) ChatContext(ctx context.Context, input string) error {
 			})
 		}
 		a.mu.Lock()
-		a.messages = append(a.messages, llm.Message{Role: llm.RoleTool, Blocks: blocks})
+		if a.pendingReset != nil {
+			a.messages = a.pendingReset
+			a.pendingReset = nil
+			if a.pendingClearStats {
+				a.inputTokens, a.outputTokens, a.lastInputTokens, a.turns = 0, 0, 0, 0
+				a.pendingClearStats = false
+			}
+		} else {
+			a.messages = append(a.messages, llm.Message{Role: llm.RoleTool, Blocks: blocks})
+		}
 		a.mu.Unlock()
 	}
 }
@@ -264,6 +352,11 @@ func (a *Agent) IsProcessing() bool {
 // SetConfirm 设置交互确认函数；REPL 用同一个输入读取器调用它，避免抢占标准输入。
 func (a *Agent) SetConfirm(confirm func(context.Context, string) (bool, error)) {
 	a.confirm = ConfirmFunc(confirm)
+}
+
+// SetPlanApproval 设置 REPL 复用输入流的计划审批函数。
+func (a *Agent) SetPlanApproval(approval func(context.Context, string) (PlanDecision, error)) {
+	a.planApproval = PlanApprovalFunc(approval)
 }
 
 type toolExecution struct {
@@ -329,9 +422,29 @@ func (a *Agent) executeToolCall(ctx context.Context, call llm.ToolCall) toolExec
 	if a.events != nil {
 		a.events(Event{Type: EventToolStart, ToolName: call.Name, Arguments: call.Arguments})
 	} else {
+		a.outputMu.Lock()
 		fmt.Fprintf(a.output, "\n  [tool] %s\n", call.Name)
+		a.outputMu.Unlock()
 	}
-	content, err := a.tools.Execute(ctx, call)
+	var content string
+	var err error
+	switch call.Name {
+	case "enter_plan_mode", "exit_plan_mode":
+		content, err = a.executePlanTool(ctx, call.Name)
+	case "skill":
+		content, err = a.executeSkillTool(ctx, input)
+	case "agent":
+		content, err = a.executeSubAgentTool(ctx, input)
+	default:
+		content, err = a.tools.Execute(ctx, call)
+	}
+	if err == nil && a.memories != nil && (call.Name == "write_file" || call.Name == "edit_file") {
+		if path, _ := input["file_path"].(string); a.memories.Contains(path) {
+			if indexErr := a.memories.RefreshIndex(); indexErr != nil {
+				err = indexErr
+			}
+		}
+	}
 	if err != nil {
 		result.err = err
 		content = "tool error: " + err.Error()
@@ -428,6 +541,151 @@ func safeFilename(value string) string {
 
 var regexpUnsafeFilename = strings.NewReplacer("/", "_", "\\", "_", ":", "_")
 
+func (a *Agent) executeSkillTool(ctx context.Context, input map[string]any) (string, error) {
+	if a.skills == nil {
+		return "", errors.New("skills registry is not configured")
+	}
+	name, _ := input["skill_name"].(string)
+	arguments, _ := input["args"].(string)
+	skill, ok := a.skills.Get(name)
+	if !ok {
+		return "", fmt.Errorf("unknown skill: %s", name)
+	}
+	prompt := skills.Resolve(skill, arguments)
+	if skill.Context == skills.ContextFork {
+		config := subagent.Config{Name: "skill-fork", Description: skill.Name, SystemPrompt: prompt, AllowedTools: skill.AllowedTools}
+		return a.runSubAgent(ctx, config, firstNonEmpty(arguments, "Execute this skill task."))
+	}
+	return fmt.Sprintf("[Skill %q activated]\n\n%s", skill.Name, prompt), nil
+}
+
+func (a *Agent) executeSubAgentTool(ctx context.Context, input map[string]any) (string, error) {
+	if a.subagents == nil {
+		return "", errors.New("sub-agent registry is not configured")
+	}
+	agentType, _ := input["type"].(string)
+	prompt, _ := input["prompt"].(string)
+	if prompt == "" {
+		return "", errors.New("sub-agent prompt is required")
+	}
+	return a.runSubAgent(ctx, a.subagents.Resolve(firstNonEmpty(agentType, "general")), prompt)
+}
+
+func (a *Agent) runSubAgent(ctx context.Context, config subagent.Config, prompt string) (string, error) {
+	if a.events != nil {
+		a.events(Event{Type: EventSubAgentStart, ToolName: config.Name, Result: config.Description})
+		defer a.events(Event{Type: EventSubAgentEnd, ToolName: config.Name})
+	}
+	registry := a.tools.Subset(config.AllowedTools, "agent")
+	var output bytes.Buffer
+	maxTurns := a.maxTurns
+	if maxTurns <= 0 {
+		maxTurns = 20
+	}
+	child := New(Options{
+		Model: a.model, Client: a.client, Tools: registry, Permissions: a.permissions, Confirm: a.confirm,
+		SystemPrompt: config.SystemPrompt, Output: &output, Thinking: a.thinking, MaxTurns: maxTurns,
+		MaxTokens: a.maxTokens, HomeDir: a.homeDir, WorkingDir: a.workingDir,
+	})
+	if err := child.ChatContext(ctx, prompt); err != nil {
+		return "", err
+	}
+	usage := child.TokenUsage()
+	a.mu.Lock()
+	a.inputTokens += usage.InputTokens
+	a.outputTokens += usage.OutputTokens
+	a.mu.Unlock()
+	text := strings.TrimSpace(output.String())
+	if text == "" {
+		text = "(Sub-agent produced no text output.)"
+	}
+	return text, nil
+}
+
+func (a *Agent) executePlanTool(ctx context.Context, name string) (string, error) {
+	if name == "enter_plan_mode" {
+		if a.permissions.Mode == permission.ModePlan {
+			return "Already in plan mode.", nil
+		}
+		a.prePlanMode = a.permissions.Mode
+		if err := a.enterPlanMode(); err != nil {
+			return "", err
+		}
+		return "Entered plan mode. Explore read-only, write the plan file, then call exit_plan_mode.", nil
+	}
+	if a.permissions.Mode != permission.ModePlan {
+		return "", errors.New("not in plan mode")
+	}
+	if a.planApproval == nil {
+		return "", errors.New("plan approval requires an interactive callback")
+	}
+	content, err := os.ReadFile(a.planFilePath)
+	if err != nil {
+		return "", fmt.Errorf("read plan file: %w", err)
+	}
+	decision, err := a.planApproval(ctx, string(content))
+	if err != nil {
+		return "", err
+	}
+	if decision.Choice == PlanKeepPlanning {
+		feedback := firstNonEmpty(decision.Feedback, "Please revise the plan.")
+		return "User requested plan changes. Feedback: " + feedback, nil
+	}
+	if decision.Choice != PlanClearAndExecute && decision.Choice != PlanExecute && decision.Choice != PlanManualExecute {
+		return "", fmt.Errorf("invalid plan approval choice: %q", decision.Choice)
+	}
+	target := a.prePlanMode
+	if target == "" || target == permission.ModePlan {
+		target = permission.ModeDefault
+	}
+	if decision.Choice == PlanExecute || decision.Choice == PlanClearAndExecute {
+		target = permission.ModeAcceptEdits
+	}
+	a.leavePlanMode(target)
+	if decision.Choice == PlanClearAndExecute {
+		a.mu.Lock()
+		a.pendingReset = []llm.Message{llm.TextMessage(llm.RoleUser, "Execute this approved implementation plan:\n\n"+string(content))}
+		a.pendingClearStats = true
+		a.mu.Unlock()
+	}
+	return fmt.Sprintf("Plan approved. Continue execution in %s mode.", target), nil
+}
+
+func (a *Agent) enterPlanMode() error {
+	dir := filepath.Join(a.homeDir, ".claude", "plans")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if a.planFilePath == "" {
+		a.planFilePath = filepath.Join(dir, "plan-"+a.sessionID+".md")
+	}
+	a.permissions.Mode = permission.ModePlan
+	a.permissions.PlanFilePath = a.planFilePath
+	a.system = a.baseSystem + fmt.Sprintf(`
+
+# Plan Mode Active
+You are in read-only plan mode. The only writable file is: %s
+Explore the project, write a structured implementation plan to that file, then call exit_plan_mode for approval.`, a.planFilePath)
+	a.tools.Activate("enter_plan_mode", "exit_plan_mode")
+	return nil
+}
+
+func (a *Agent) leavePlanMode(mode permission.Mode) {
+	a.permissions.Mode = mode
+	a.permissions.PlanFilePath = ""
+	a.system = a.baseSystem
+	a.prePlanMode = ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // ClearHistory 清空消息、token 和轮次统计。
 func (a *Agent) ClearHistory() {
 	a.mu.Lock()
@@ -464,22 +722,79 @@ func (a *Agent) compactContext(ctx context.Context) error {
 	return a.SaveSession()
 }
 
-// TogglePlanMode 在普通模式和只读计划模式之间切换；完整审批流程由阶段五接入。
+// TogglePlanMode 在普通模式和只读计划模式之间切换。
 func (a *Agent) TogglePlanMode() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.permissions.Mode == permission.ModePlan {
 		mode := a.prePlanMode
 		if mode == "" {
 			mode = permission.ModeDefault
 		}
-		a.permissions.Mode = mode
-		a.prePlanMode = ""
+		a.leavePlanMode(mode)
 		return string(mode)
 	}
 	a.prePlanMode = a.permissions.Mode
-	a.permissions.Mode = permission.ModePlan
+	if err := a.enterPlanMode(); err != nil {
+		return "error: " + err.Error()
+	}
 	return string(permission.ModePlan)
+}
+
+// PlanFilePath 返回当前计划文件路径。
+func (a *Agent) PlanFilePath() string { return a.planFilePath }
+
+// MemoryDescriptions 返回 REPL 可展示的记忆摘要。
+func (a *Agent) MemoryDescriptions() []string {
+	if a.memories == nil {
+		return nil
+	}
+	items, _ := a.memories.List()
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		result = append(result, fmt.Sprintf("[%s] %s — %s", item.Type, item.Name, item.Description))
+	}
+	return result
+}
+
+// SkillDescriptions 返回 REPL 可展示的技能摘要。
+func (a *Agent) SkillDescriptions() []string {
+	if a.skills == nil {
+		return nil
+	}
+	items := a.skills.Discover()
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		name := item.Name
+		if item.UserInvocable {
+			name = "/" + name
+		}
+		result = append(result, fmt.Sprintf("%s (%s) — %s", name, item.Source, item.Description))
+	}
+	return result
+}
+
+// InvokeSkill 处理 REPL 的 /<skill> 调用；返回 false 表示不是已注册技能。
+func (a *Agent) InvokeSkill(command string) (bool, error) {
+	if a.skills == nil || !strings.HasPrefix(command, "/") {
+		return false, nil
+	}
+	parts := strings.SplitN(strings.TrimPrefix(command, "/"), " ", 2)
+	skill, ok := a.skills.Get(parts[0])
+	if !ok || !skill.UserInvocable {
+		return false, nil
+	}
+	arguments := ""
+	if len(parts) == 2 {
+		arguments = parts[1]
+	}
+	prompt := skills.Resolve(skill, arguments)
+	if skill.Context == skills.ContextFork {
+		result, err := a.runSubAgent(context.Background(), subagent.Config{Name: "skill-fork", SystemPrompt: prompt, AllowedTools: skill.AllowedTools}, firstNonEmpty(arguments, "Execute this skill task."))
+		if result != "" {
+			fmt.Fprintln(a.output, result)
+		}
+		return true, err
+	}
+	return true, a.Chat(prompt)
 }
 
 // RestoreSession 用版本化会话恢复消息和 token 统计。

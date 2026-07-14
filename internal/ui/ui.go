@@ -16,13 +16,14 @@ import (
 )
 
 const (
-	ansiReset  = "\x1b[0m"
-	ansiGray   = "\x1b[90m"
-	ansiRed    = "\x1b[31m"
-	ansiGreen  = "\x1b[32m"
-	ansiYellow = "\x1b[33m"
-	ansiCyan   = "\x1b[36m"
-	ansiBold   = "\x1b[1m"
+	ansiReset   = "\x1b[0m"
+	ansiGray    = "\x1b[90m"
+	ansiRed     = "\x1b[31m"
+	ansiGreen   = "\x1b[32m"
+	ansiYellow  = "\x1b[33m"
+	ansiCyan    = "\x1b[36m"
+	ansiMagenta = "\x1b[35m"
+	ansiBold    = "\x1b[1m"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -60,6 +61,15 @@ func (r *Renderer) HandleAgentEvent(event agent.Event) {
 		r.printToolStart(event.ToolName, event.Arguments)
 	case agent.EventToolResult:
 		r.printToolResult(event.ToolName, event.Result, event.IsError)
+	case agent.EventSubAgentStart:
+		r.stopSpinner()
+		r.mu.Lock()
+		fmt.Fprintln(r.output, r.color(ansiMagenta, fmt.Sprintf("\n  ┌─ Sub-agent [%s]: %s", event.ToolName, event.Result)))
+		r.mu.Unlock()
+	case agent.EventSubAgentEnd:
+		r.mu.Lock()
+		fmt.Fprintln(r.output, r.color(ansiMagenta, fmt.Sprintf("  └─ Sub-agent [%s] completed", event.ToolName)))
+		r.mu.Unlock()
 	}
 }
 

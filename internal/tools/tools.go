@@ -97,7 +97,7 @@ func DefaultRegistry(root string) *Registry {
 	r.Register(deferredDef("exit_plan_mode", "Exit plan mode and request approval."), unsupported("plan mode is handled by the agent"), false)
 	r.Register(def("agent", "Launch an isolated sub-agent.", objectSchema(map[string]any{
 		"description": stringProperty("Short task description"), "prompt": stringProperty("Detailed task"),
-		"type": map[string]any{"type": "string", "enum": []string{"explore", "plan", "general"}},
+		"type": stringProperty("Agent type: explore, plan, general, or a custom .claude/agents name"),
 	}, "description", "prompt")), unsupported("sub-agent is handled by the agent"), false)
 	r.Register(def("tool_search", "Activate deferred tools matching a query.", objectSchema(map[string]any{
 		"query": stringProperty("Tool name or keyword"),
@@ -110,6 +110,40 @@ func (r *Registry) Register(definition llm.ToolDefinition, handler Handler, conc
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[definition.Name] = registeredTool{definition: definition, handler: handler, concurrencySafe: concurrencySafe}
+}
+
+// Activate 激活一个或多个延迟工具。
+func (r *Registry) Activate(names ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range names {
+		if item, ok := r.tools[name]; ok && item.definition.Deferred {
+			r.activated[name] = true
+		}
+	}
+}
+
+// Subset 创建共享处理函数但拥有独立定义集合的子注册表，用于受限子 Agent。
+func (r *Registry) Subset(allowed []string, excluded ...string) *Registry {
+	allow := map[string]bool{}
+	for _, name := range allowed {
+		allow[name] = true
+	}
+	deny := map[string]bool{}
+	for _, name := range excluded {
+		deny[name] = true
+	}
+	result := NewRegistry(r.root)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for name, item := range r.tools {
+		if deny[name] || (len(allow) > 0 && !allow[name]) {
+			continue
+		}
+		result.tools[name] = item
+		result.activated[name] = r.activated[name]
+	}
+	return result
 }
 
 // Definitions 返回当前应发送给模型的工具定义。
