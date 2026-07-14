@@ -43,3 +43,25 @@ func TestExplicitAPIBaseSelectsOpenAIProtocol(t *testing.T) {
 		t.Fatalf("provider = %q", provider)
 	}
 }
+
+func TestOneShotPromptRunsExactlyOnce(t *testing.T) {
+	calls := 0
+	var prompt string
+	command := NewRootCommand(func(key string) string {
+		if key == "OPENAI_API_KEY" {
+			return "test-key"
+		}
+		return ""
+	}, func(_ context.Context, options config.Options) error {
+		calls++
+		prompt = options.Prompt
+		return nil
+	})
+	command.SetArgs([]string{"fix", "the", "tests"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || prompt != "fix the tests" {
+		t.Fatalf("calls=%d prompt=%q", calls, prompt)
+	}
+}

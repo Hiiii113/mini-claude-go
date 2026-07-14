@@ -44,10 +44,15 @@ func RunRepl(agent Agent) error {
 	interrupts := make(chan os.Signal, 2)
 	signal.Notify(interrupts, os.Interrupt)
 	defer signal.Stop(interrupts)
-	go func() {
-		idleInterrupts := 0
-		var lastIdleInterrupt time.Time
-		for range interrupts {
+	done := make(chan error, 1)
+	go func() { done <- Run(os.Stdin, os.Stdout, agent) }()
+	idleInterrupts := 0
+	var lastIdleInterrupt time.Time
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-interrupts:
 			if target, ok := agent.(abortable); ok && target.IsProcessing() {
 				target.Abort()
 				fmt.Fprintln(os.Stdout, "\n  (interrupted)")
@@ -61,12 +66,11 @@ func RunRepl(agent Agent) error {
 			lastIdleInterrupt = time.Now()
 			if idleInterrupts >= 2 {
 				fmt.Fprintln(os.Stdout, "\nBye!")
-				os.Exit(0)
+				return nil
 			}
 			fmt.Fprintln(os.Stdout, "\n  Press Ctrl+C again to exit.")
 		}
-	}()
-	return Run(os.Stdin, os.Stdout, agent)
+	}
 }
 
 // Run 使用指定输入输出运行可测试的 REPL。

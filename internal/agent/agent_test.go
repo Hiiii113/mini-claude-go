@@ -57,6 +57,49 @@ func TestAgentLoopExecutesToolAndContinues(t *testing.T) {
 	}
 }
 
+func TestLargeToolResultPersistsFullOutput(t *testing.T) {
+	home := t.TempDir()
+	full := strings.Repeat("complete-line-abcdefghijklmnopqrstuvwxyz\n", 2000)
+	registry := tools.NewRegistry(t.TempDir())
+	registry.Register(llm.ToolDefinition{Name: "large"}, func(context.Context, json.RawMessage) (string, error) {
+		return full, nil
+	}, true)
+	a := New(Options{
+		Tools: registry, HomeDir: home, Output: &bytes.Buffer{},
+		Permissions: permission.New(permission.ModeBypassPermissions, home, t.TempDir()),
+	})
+	result := a.executeToolCall(context.Background(), llm.ToolCall{Name: "large", Arguments: json.RawMessage(`{}`)})
+	if result.err != nil || !strings.Contains(result.content, "Full output saved to") {
+		t.Fatalf("result=%#v", result)
+	}
+	matches, err := filepath.Glob(filepath.Join(home, ".mini-claude", "tool-results", "*-large.txt"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("matches=%v err=%v", matches, err)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != full {
+		t.Fatalf("saved bytes=%d want=%d", len(data), len(full))
+	}
+}
+
+func TestMaxTurnsStopsBeforeAnotherModelCall(t *testing.T) {
+	arguments := json.RawMessage(`{}`)
+	fake := &llm.FakeClient{Responses: []llm.Response{{
+		Message:   llm.Message{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.BlockToolCall, ToolCallID: "one", ToolName: "noop", Arguments: arguments}}},
+		ToolCalls: []llm.ToolCall{{ID: "one", Name: "noop", Arguments: arguments}},
+	}}}
+	registry := tools.NewRegistry(t.TempDir())
+	registry.Register(llm.ToolDefinition{Name: "noop"}, func(context.Context, json.RawMessage) (string, error) { return "ok", nil }, true)
+	a := New(Options{Model: "fake", Client: fake, Tools: registry, MaxTurns: 1, Output: &bytes.Buffer{}, Permissions: permission.New(permission.ModeBypassPermissions, t.TempDir(), t.TempDir())})
+	err := a.ChatContext(context.Background(), "start")
+	if err == nil || !strings.Contains(err.Error(), "turn limit reached") || len(fake.Requests) != 1 {
+		t.Fatalf("err=%v requests=%d", err, len(fake.Requests))
+	}
+}
+
 func TestAgentAutoSavesNeutralSession(t *testing.T) {
 	store := session.NewStoreAt(t.TempDir())
 	fake := &llm.FakeClient{Responses: []llm.Response{{Message: llm.TextMessage(llm.RoleAssistant, "done"), Text: "done", Usage: llm.Usage{InputTokens: 4, OutputTokens: 2}}}}

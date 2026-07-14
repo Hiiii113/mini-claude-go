@@ -178,7 +178,9 @@ func (r *Registry) Execute(ctx context.Context, call llm.ToolCall) (string, erro
 		return "", fmt.Errorf("unknown tool: %s", call.Name)
 	}
 	result, err := item.handler(ctx, call.Arguments)
-	return TruncateResult(result), err
+	// 工具层必须保留完整结果，交给 Agent 统一决定是直接送入模型，
+	// 还是完整落盘后只把摘要放进上下文。若在这里提前截断，落盘内容也会丢失。
+	return result, err
 }
 
 // TruncateResult 限制进入模型上下文的异常超长结果。
@@ -244,7 +246,7 @@ func (r *Registry) writeFile(_ context.Context, raw json.RawMessage) (string, er
 		return "", err
 	}
 	r.refreshReadState(path)
-	return fmt.Sprintf("Successfully wrote to %s (%d lines)", path, lineCount(input.Content)), nil
+	return formatWriteResult(path, input.Content), nil
 }
 
 func (r *Registry) editFile(_ context.Context, raw json.RawMessage) (string, error) {
@@ -286,7 +288,7 @@ func (r *Registry) editFile(_ context.Context, raw json.RawMessage) (string, err
 		return "", err
 	}
 	r.refreshReadState(path)
-	return fmt.Sprintf("Successfully edited %s%s", path, note), nil
+	return fmt.Sprintf("Successfully edited %s%s\n- %s\n+ %s", path, note, previewLine(old), previewLine(input.New)), nil
 }
 
 func (r *Registry) listFiles(_ context.Context, raw json.RawMessage) (string, error) {
@@ -341,7 +343,16 @@ func (r *Registry) grepSearch(ctx context.Context, raw json.RawMessage) (string,
 			return nil
 		}
 		if input.Include != "" {
-			matched, _ := doublestar.Match(filepath.ToSlash(input.Include), filepath.ToSlash(entry.Name()))
+			relative, relErr := filepath.Rel(target, path)
+			if relErr != nil {
+				return nil
+			}
+			patternPath := filepath.ToSlash(relative)
+			matched, _ := doublestar.Match(filepath.ToSlash(input.Include), patternPath)
+			if !matched {
+				// 兼容原项目中常用的 `*.go`：它应匹配任意子目录里的文件名。
+				matched, _ = doublestar.Match(filepath.ToSlash(input.Include), filepath.ToSlash(entry.Name()))
+			}
 			if !matched {
 				return nil
 			}
@@ -367,6 +378,34 @@ func (r *Registry) grepSearch(ctx context.Context, raw json.RawMessage) (string,
 		return nil
 	})
 	return strings.TrimSuffix(output.String(), "\n"), err
+}
+
+func formatWriteResult(path, content string) string {
+	const previewLimit = 30
+	lines := strings.Split(content, "\n")
+	var output strings.Builder
+	fmt.Fprintf(&output, "Successfully wrote to %s (%d lines)", path, len(lines))
+	limit := len(lines)
+	if limit > previewLimit {
+		limit = previewLimit
+	}
+	for index := 0; index < limit; index++ {
+		fmt.Fprintf(&output, "\n%4d | %s", index+1, lines[index])
+	}
+	if len(lines) > previewLimit {
+		fmt.Fprintf(&output, "\n... (%d lines total)", len(lines))
+	}
+	return output.String()
+}
+
+func previewLine(value string) string {
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	const limit = 240
+	if len(value) > limit {
+		return value[:limit] + "..."
+	}
+	return value
 }
 
 func (r *Registry) runShell(ctx context.Context, raw json.RawMessage) (string, error) {
