@@ -1,6 +1,7 @@
 package acceptance
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +23,13 @@ func TestGitHubWorkflowsAreValidYAML(t *testing.T) {
 			}
 			if document["name"] == nil || document["on"] == nil || document["jobs"] == nil {
 				t.Fatalf("workflow is missing name, on, or jobs: %#v", document)
+			}
+			if name == "release.yml" {
+				for _, required := range [][]byte{[]byte(".env.example"), []byte("windows linux darwin"), []byte("amd64 arm64"), []byte("SHA256SUMS"), []byte("gh release create")} {
+					if !bytes.Contains(content, required) {
+						t.Fatalf("release workflow is missing %q", required)
+					}
+				}
 			}
 		})
 	}

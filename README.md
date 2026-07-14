@@ -38,98 +38,210 @@ flowchart TD
 
 ## 快速开始
 
-### 1. 准备环境
+### 方式一：下载 Release 直接使用（推荐）
 
-需要：
+使用 Release 不需要安装 Go 或 Git，只需要一个可用的模型 API Key。
 
-- Go 1.26.2 或更高版本
-- 一个可用的 Anthropic API Key，或 OpenAI-compatible 服务的 API Key
-- Git（从源码安装时需要）
+#### 1. 选择正确的安装包
 
-确认 Go 已安装：
+打开 [最新 Release 页面](https://github.com/Hiiii113/mini-claude-go/releases/latest)，在 **Assets** 中根据系统和 CPU 下载文件，同时下载 `SHA256SUMS`：
 
-```bash
-go version
+| 系统 | CPU | 应下载的文件 |
+| --- | --- | --- |
+| Windows 64 位普通电脑 | Intel / AMD | `mini-claude-go_<版本>_windows_amd64.zip` |
+| Windows ARM 电脑 | ARM64 | `mini-claude-go_<版本>_windows_arm64.zip` |
+| Linux 64 位普通电脑 | Intel / AMD | `mini-claude-go_<版本>_linux_amd64.tar.gz` |
+| Linux ARM 设备 | ARM64 | `mini-claude-go_<版本>_linux_arm64.tar.gz` |
+| macOS Intel | Intel | `mini-claude-go_<版本>_darwin_amd64.tar.gz` |
+| macOS Apple Silicon | M1 / M2 / M3 / M4 | `mini-claude-go_<版本>_darwin_arm64.tar.gz` |
+
+不知道 CPU 架构时可以执行：
+
+```powershell
+# Windows：通常显示 AMD64 或 ARM64
+$env:PROCESSOR_ARCHITECTURE
 ```
 
-### 2. 获取源码
-
 ```bash
-git clone https://github.com/Hiiii113/mini-claude-go.git
-cd mini-claude-go
+# Linux / macOS：x86_64 对应 amd64，arm64 或 aarch64 对应 arm64
+uname -m
 ```
 
-也可以从 GitHub Releases 下载与你操作系统对应的二进制；下载后将其重命名为 `mini-claude`（Windows 为 `mini-claude.exe`），并放到 `PATH` 中的目录。
+#### 2. 校验下载文件（推荐）
 
-### 3. 配置模型
-
-复制配置模板：
+下面以 `v0.1.0` 为例；使用其他版本时替换文件名。
 
 Windows PowerShell：
 
 ```powershell
-Copy-Item .env.example .env
+$asset = "mini-claude-go_0.1.0_windows_amd64.zip"
+$expected = (Select-String -Path .\SHA256SUMS -Pattern ([regex]::Escape($asset))).Line.Split()[0]
+$actual = (Get-FileHash ".\$asset" -Algorithm SHA256).Hash.ToLower()
+$actual -eq $expected
 ```
 
-Linux / macOS：
+输出 `True` 表示校验通过。
+
+Linux：
 
 ```bash
+grep 'mini-claude-go_0.1.0_linux_amd64.tar.gz' SHA256SUMS | sha256sum -c -
+```
+
+macOS：
+
+```bash
+grep 'mini-claude-go_0.1.0_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -
+```
+
+#### 3. 解压
+
+Windows PowerShell：
+
+```powershell
+Expand-Archive .\mini-claude-go_0.1.0_windows_amd64.zip -DestinationPath .
+Set-Location .\mini-claude-go_0.1.0_windows_amd64
+.\mini-claude.exe --help
+```
+
+Linux：
+
+```bash
+tar -xzf mini-claude-go_0.1.0_linux_amd64.tar.gz
+cd mini-claude-go_0.1.0_linux_amd64
+chmod +x mini-claude
+./mini-claude --help
+```
+
+macOS Apple Silicon：
+
+```bash
+tar -xzf mini-claude-go_0.1.0_darwin_arm64.tar.gz
+cd mini-claude-go_0.1.0_darwin_arm64
+chmod +x mini-claude
+./mini-claude --help
+```
+
+#### 4. 配置模型并运行
+
+临时配置只对当前终端有效，适合首次测试。
+
+Windows PowerShell 使用 Anthropic：
+
+```powershell
+$env:ANTHROPIC_API_KEY = "your-anthropic-api-key"
+$env:ANTHROPIC_MODEL = "claude-sonnet-4-5"
+.\mini-claude.exe
+```
+
+Windows PowerShell 使用 OpenAI-compatible：
+
+```powershell
+$env:OPENAI_API_KEY = "your-openai-api-key"
+$env:OPENAI_MODEL = "gpt-4.1-mini"
+# $env:OPENAI_BASE_URL = "https://api.openai.com/v1"
+.\mini-claude.exe
+```
+
+Linux / macOS 使用 Anthropic：
+
+```bash
+export ANTHROPIC_API_KEY="your-anthropic-api-key"
+export ANTHROPIC_MODEL="claude-sonnet-4-5"
+./mini-claude
+```
+
+也可以把压缩包中的 `.env.example` 复制为当前工作目录下的 `.env`，然后填写配置：
+
+```powershell
+# Windows
+Copy-Item .env.example .env
+notepad .env
+```
+
+```bash
+# Linux / macOS
 cp .env.example .env
+${EDITOR:-nano} .env
 ```
 
-使用 Anthropic 原生协议时，编辑 `.env`：
+程序读取的是**启动命令所在工作目录**中的 `.env`。如果要在其他代码项目中使用，请设置系统/用户环境变量，或者在目标项目中放置已被 `.gitignore` 排除的 `.env`。不要提交真实 API Key。
 
-```dotenv
-ANTHROPIC_API_KEY=your-anthropic-api-key
-ANTHROPIC_MODEL=claude-sonnet-4-5
-# ANTHROPIC_BASE_URL=https://api.anthropic.com
+执行一次任务并退出：
+
+```powershell
+.\mini-claude.exe "阅读当前项目并说明入口文件的作用"
 ```
 
-使用 OpenAI 或兼容服务时：
-
-```dotenv
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_MODEL=gpt-4.1-mini
-# OPENAI_BASE_URL=https://api.openai.com/v1
+```bash
+./mini-claude "阅读当前项目并说明入口文件的作用"
 ```
 
-如果同时配置两种 Key，程序优先使用 OpenAI。命令行的 `--model` 和 `--api-base` 会覆盖环境变量；旧变量 `API_KEY`、`BASE_URL`、`MODEL_NAME` 仍可使用，但优先级最低。
+### 方式二：从源码运行或安装
 
-### 4. 运行
+需要 Go 1.26.2 或更高版本以及 Git：
 
-直接从源码启动 REPL：
+```bash
+go version
+git clone https://github.com/Hiiii113/mini-claude-go.git
+cd mini-claude-go
+```
+
+复制并编辑配置模板：
+
+```powershell
+# Windows
+Copy-Item .env.example .env
+notepad .env
+```
+
+```bash
+# Linux / macOS
+cp .env.example .env
+${EDITOR:-nano} .env
+```
+
+启动 REPL：
 
 ```bash
 go run .
 ```
 
-执行一次任务并在完成后退出：
+执行一次任务并退出：
 
 ```bash
 go run . "阅读当前项目并说明入口文件的作用"
 ```
 
-构建本机二进制：
-
-```bash
-go build -o mini-claude .
-```
-
-Windows 可以使用：
+构建到被 Git 忽略的 `bin/` 目录：
 
 ```powershell
-go build -o mini-claude.exe .
-.\mini-claude.exe --help
+# Windows
+New-Item -ItemType Directory -Force bin | Out-Null
+go build -trimpath -o .\bin\mini-claude.exe .
+.\bin\mini-claude.exe --help
 ```
 
-安装到 Go 的用户 bin 目录：
+```bash
+# Linux / macOS
+mkdir -p bin
+go build -trimpath -o ./bin/mini-claude .
+./bin/mini-claude --help
+```
+
+也可以使用 Go 安装：
 
 ```bash
 go install .
+```
+
+可执行文件会安装到 `go env GOBIN` 指定的目录；如果 `GOBIN` 为空，则安装到 `go env GOPATH` 的第一个目录下的 `bin`。把该目录加入 `PATH` 后即可执行：
+
+```bash
 mini-claude --help
 ```
 
-如果安装后找不到命令，请把 `go env GOPATH` 返回目录下的 `bin` 加入系统 `PATH`。
+后端选择优先级为 OpenAI 环境变量、Anthropic 环境变量、旧版通用变量；如果同时配置 OpenAI 和 Anthropic Key，程序优先使用 OpenAI。命令行 `--model` 和 `--api-base` 会覆盖对应的模型与地址配置。旧变量 `API_KEY`、`BASE_URL`、`MODEL_NAME` 仍可使用，但优先级最低。
 
 ## 常用示例
 
@@ -388,45 +500,7 @@ SHA256SUMS
 
 不要移动或重复使用已经公开发布的版本标签。发布下一个版本时创建新标签，例如 `v0.1.1`。
 
-### 3. 下载并验证 Release
-
-Linux 下载压缩包和 `SHA256SUMS` 后，可以只校验当前文件：
-
-```bash
-grep 'mini-claude-go_0.1.0_linux_amd64.tar.gz' SHA256SUMS | sha256sum -c -
-```
-
-macOS 使用系统自带的 `shasum`：
-
-```bash
-grep 'mini-claude-go_0.1.0_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -
-```
-
-Windows PowerShell 可以查看下载文件的摘要，并与 `SHA256SUMS` 中对应值比较：
-
-```powershell
-Get-FileHash .\mini-claude-go_0.1.0_windows_amd64.zip -Algorithm SHA256
-Get-Content .\SHA256SUMS
-```
-
-解压后运行：
-
-```powershell
-.\mini-claude.exe --help
-```
-
-Linux / macOS：
-
-```bash
-tar -xzf mini-claude-go_0.1.0_linux_amd64.tar.gz
-cd mini-claude-go_0.1.0_linux_amd64
-chmod +x mini-claude
-./mini-claude --help
-```
-
-macOS 用户应把示例文件名中的 `linux` 改为 `darwin`。
-
-### 4. 手动发布兜底
+### 3. 手动发布兜底
 
 如果不使用 GitHub Actions，可以在 PowerShell 中交叉编译三个 amd64 二进制：
 
