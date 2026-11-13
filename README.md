@@ -197,3 +197,7 @@ git push origin v0.1.1
 ## 许可
 
 本项目基于 MIT License 发布，详见 [LICENSE](LICENSE)。
+
+## 署名
+
+README 的审阅、校对与文字整理：Qgent。
